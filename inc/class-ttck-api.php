@@ -229,6 +229,50 @@ class TTCK_API
 	 *
 	 * Còn 32 ký tự, 5 vị trí ⇒ ~33 triệu tổ hợp cho mỗi shop mỗi lần tạo mã.
 	 */
+	/** Số ký tự của mã riêng đứng đầu nội dung QR POS */
+	const POS_TOKEN_LEN = 3;
+
+	/**
+	 * Bóc "mã riêng + mã phiếu" từ một nội dung — nội dung đã lưu, hoặc mô tả
+	 * giao dịch ngân hàng trả về (có thể bị viết hoa, đổi dấu cách, dồn liền:
+	 * "K7MTTQR26001AA19775TGSBAOHA").
+	 *
+	 * @return array{token:string,bill:string}|null  null = không phải định dạng POS mới
+	 */
+	public static function parse_pos_memo($text)
+	{
+		$text = strtoupper(remove_accents((string) $text));
+		$alpha = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+		// Có dấu phân cách: "K7M TT QR 26001AA19775 ..."
+		if (preg_match('/(?<![A-Z0-9])([' . $alpha . ']{3})[^A-Z0-9]*TT[^A-Z0-9]*QR[^A-Z0-9]*([A-Z0-9]*[0-9])(?![A-Z0-9]*[0-9])/', $text, $m)
+			&& preg_match('/(?<![A-Z0-9])' . $m[1] . '[^A-Z0-9]+TT/', $text)) {
+			return ['token' => $m[1], 'bill' => $m[2]];
+		}
+		// Ngân hàng dồn liền cả chuỗi: "K7MTTQR26001AA19775TGSBAOHA"
+		$compact = preg_replace('/[^A-Z0-9]/', '', $text);
+		if (preg_match('/([' . $alpha . ']{3})TTQR([A-Z0-9]*?[0-9])(?=TGS|$)/', $compact, $m)) {
+			return ['token' => $m[1], 'bill' => $m[2]];
+		}
+		return null;
+	}
+
+	/**
+	 * Nội dung QR (đã lưu) và mô tả giao dịch ngân hàng có phải CÙNG một lần
+	 * tạo QR POS không: trùng CẢ mã riêng LẪN mã phiếu. Chỉ trùng mã phiếu là
+	 * KHÔNG khớp (tab khác cùng số phiếu).
+	 */
+	public static function pos_memo_matches($payment_content, $bank_description)
+	{
+		$mine = self::parse_pos_memo($payment_content);
+		if (!$mine) {
+			return false;
+		}
+		$theirs = self::parse_pos_memo($bank_description);
+		return $theirs !== null
+			&& $theirs['token'] === $mine['token']
+			&& $theirs['bill'] === $mine['bill'];
+	}
+
 	public static function random_qr_token($length = 5)
 	{
 		$alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -263,22 +307,30 @@ class TTCK_API
 	 * Mã phiếu bán vẫn được lưu nguyên ở cột `bill_code`, nên báo cáo và đối
 	 * soát theo phiếu không mất gì.
 	 */
-	public static function build_qr_content($blog_id = 0, $bill_code = '')
+	public static function build_qr_content($blog_id = 0, $bill_code = '', $token = '')
 	{
 		$shop = self::shop_name_slug($blog_id);
 
-		// New mandated format: "TT QR cho CT THE GIOI SUA - TGS<SHOP> - <BILL_CODE>"
-		// If a bill_code is provided, prefer the explicit readable format
-		// so that bank statements contain the invoice id for easy matching.
 		$bill_code = trim((string) $bill_code);
 		if ($bill_code !== '') {
-			// Mandated readable format requested by operations team:
-			// "TT QR cho CT THE GIOI SUA - TGS<SHOP> - <BILL_CODE>"
+			/*
+			 * ĐỊNH DẠNG POS (28/09/2026):  "<3 ký tự riêng> TT QR <mã phiếu> TGS<SHOP>"
+			 *                          VD:  "K7M TT QR 26001AA19775 TGSBAOHA"
+			 *
+			 * Kế toán cần MÃ PHIẾU trong nội dung → giữ nguyên. Nhưng mã phiếu
+			 * KHÔNG duy nhất: nhiều tab POS cùng hiện "số kế tiếp", và shop đẩy
+			 * HTsoft thì số đó chỉ là MAX+1 của HTsoft (không giữ chỗ). Hai QR
+			 * trùng mã phiếu mà khớp theo mã phiếu là tắt nhầm đơn khách khác.
+			 * → thêm 3 ký tự SINH RIÊNG CHO TỪNG QR; máy khớp theo CẢ HAI
+			 *   (xem pos_memo_matches()). Đứng ĐẦU theo yêu cầu vận hành.
+			 */
 			$shop_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $shop));
 			$bill_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $bill_code));
-			// Use compact format preferred: "TT QR <BILL_CODE> TGS<SHOP>".
-			// Keep it short so it survives bank truncation and is easy to parse.
-			return sprintf('TT QR %s TGS%s', $bill_part, $shop_part);
+			$token = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', (string) $token));
+			if (strlen($token) !== self::POS_TOKEN_LEN) {
+				$token = self::random_qr_token(self::POS_TOKEN_LEN);
+			}
+			return sprintf('%s TT QR %s TGS%s', $token, $bill_part, $shop_part);
 		}
 
 		// Fallback: keep the previous random token format for backwards compat

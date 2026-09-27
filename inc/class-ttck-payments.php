@@ -169,7 +169,22 @@ class TTCK_Payments
 			// Use the exact mandated readable format for bank memo when
 			// bill_code is present. Do not prefix with ref_code so the memo
 			// matches the required pattern exactly.
-			$readable = TTCK_API::build_qr_content(0, $bill_code);
+			/*
+			 * 3 ký tự riêng không được trùng với QR khác ĐANG CHỜ cùng mã phiếu
+			 * (vd 2 tab cùng số) — thử lại tối đa 20 lần (32^3 = 32.768 tổ hợp).
+			 */
+			$readable = '';
+			for ($try = 0; $try < 20; $try++) {
+				$readable = TTCK_API::build_qr_content(0, $bill_code);
+				$dup = (int) $wpdb->get_var($wpdb->prepare(
+					'SELECT COUNT(*) FROM ' . self::table() . " WHERE id <> %d AND status = 'pending' AND content = %s",
+					$id,
+					TTCK_Banks::ascii($readable)
+				));
+				if ($dup === 0) {
+					break;
+				}
+			}
 			$content = TTCK_Banks::ascii($readable);
 		} else {
 			$content = TTCK_Banks::ascii(TTCKPayment::transaction_text($ref_code, null));
@@ -258,6 +273,38 @@ class TTCK_Payments
 		return $row ? self::hydrate($row) : null;
 	}
 
+	/**
+	 * Tìm yêu cầu thanh toán theo NỘI DUNG POS MỚI "<3 ký tự> TT QR <mã phiếu> ..."
+	 * nằm trong mô tả giao dịch ngân hàng — khớp CẢ mã riêng lẫn mã phiếu.
+	 */
+	public static function get_by_pos_memo($bank_description)
+	{
+		global $wpdb;
+		if (!is_callable(array('TTCK_API', 'parse_pos_memo'))) {
+			return null;
+		}
+		$memo = TTCK_API::parse_pos_memo($bank_description);
+		if (!$memo) {
+			return null;
+		}
+		$prefix = $memo['token'] . ' TT QR ' . $memo['bill'];
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				'SELECT * FROM ' . self::table() . " WHERE content = %s OR content LIKE %s
+				 ORDER BY (status = 'pending') DESC, id DESC LIMIT 1",
+				$prefix,
+				$wpdb->esc_like($prefix . ' ') . '%'
+			),
+			ARRAY_A
+		);
+		return $row ? self::hydrate($row) : null;
+	}
+
+	/**
+	 * Tìm theo MÃ PHIẾU — CHỈ cho QR định dạng CŨ. QR định dạng mới
+	 * ("<3 ký tự> TT QR …") bị loại: mã phiếu có thể trùng giữa các tab, QR mới
+	 * bắt buộc khớp qua get_by_pos_memo() (cả mã riêng lẫn mã phiếu).
+	 */
 	public static function get_by_bill_code($bill_code)
 	{
 		global $wpdb;
@@ -270,6 +317,7 @@ class TTCK_Payments
 		$row = $wpdb->get_row(
 			$wpdb->prepare(
 				'SELECT * FROM ' . self::table() . " WHERE bill_code = %s
+				   AND content NOT REGEXP '^[A-Za-z0-9]{3} TT QR '
 				 ORDER BY (status = 'pending') DESC, id DESC LIMIT 1",
 				$bill_code
 			),

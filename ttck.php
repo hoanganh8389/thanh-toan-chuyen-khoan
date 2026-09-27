@@ -551,6 +551,14 @@ class TTCKPayment
 				 *   2. Mã phiếu bán — dạng CŨ, giữ lại để mấy giao dịch của
 				 *      những mã QR phát trước lần đổi này vẫn tự khớp được.
 				 */
+				// Nội dung POS mới "<3 ký tự> TT QR <mã phiếu> ..." — khớp CẢ HAI
+				if (!$payment && is_callable(array('TTCK_Payments', 'get_by_pos_memo'))) {
+					$payment = TTCK_Payments::get_by_pos_memo((string) $des . ' ' . (string) $transaction->description);
+					if ($payment) {
+						$ref_code = $payment['ref_code'];
+					}
+				}
+
 				if (!$payment) {
 					if (preg_match_all('/[A-Za-z0-9.]{6,}/', (string) $des, $tokens)) {
 						foreach ($tokens[0] as $token) {
